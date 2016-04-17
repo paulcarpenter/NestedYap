@@ -84,6 +84,9 @@ static int connectionBusyHandler(void *ptr, int count)
 	return 1;
 }
 
+static YapDatabaseReadTransaction *activeNestedReadTransaction;
+static YapDatabaseReadWriteTransaction *activeNestedReadWriteTransaction;
+
 @implementation YapDatabaseConnection {
 @private
 	
@@ -1818,13 +1821,26 @@ static int connectionBusyHandler(void *ptr, int count)
 #ifndef NS_BLOCK_ASSERTIONS
 	if (dispatch_get_specific(IsOnConnectionQueueKey))
 	{
-		// You are attempting to execute a transaction within a transaction.
-		// This will result in deadlock.
-		// 
-		// For more information, see the "Thread Safety" wiki page:
-		// https://github.com/yapstudios/YapDatabase/wiki/Thread-Safety#connections-queues--deadlock
-		
-		@throw [self deadlockDetectionException];
+    if (activeNestedReadTransaction)
+    {
+      block(activeNestedReadTransaction);
+      return;
+    }
+    else if (activeNestedReadWriteTransaction)
+    {
+      block(activeNestedReadWriteTransaction);
+      return;
+    }
+    else
+    {
+			// You are attempting to execute a transaction within a transaction.
+			// This will result in deadlock.
+			// 
+			// For more information, see the "Thread Safety" wiki page:
+			// https://github.com/yapstudios/YapDatabase/wiki/Thread-Safety#connections-queues--deadlock
+			
+			@throw [self deadlockDetectionException];
+		}
 	}
 #endif
 	
@@ -1871,13 +1887,21 @@ static int connectionBusyHandler(void *ptr, int count)
 	if (dispatch_get_specific(IsOnConnectionQueueKey) ||
 	    dispatch_get_specific(database->IsOnWriteQueueKey))
 	{
-		// You are attempting to execute a transaction within a transaction.
-		// This will result in deadlock.
-		//
-		// For more information, see the "Thread Safety" wiki page:
-		// https://github.com/yapstudios/YapDatabase/wiki/Thread-Safety#connections-queues--deadlock
-		
-		@throw [self deadlockDetectionException];
+		if (activeNestedReadWriteTransaction)
+		{
+			block(activeNestedReadWriteTransaction);
+			return;
+		}
+		else
+		{
+			// You are attempting to execute a transaction within a transaction.
+			// This will result in deadlock.
+			//
+			// For more information, see the "Thread Safety" wiki page:
+			// https://github.com/yapstudios/YapDatabase/wiki/Thread-Safety#connections-queues--deadlock
+			
+			@throw [self deadlockDetectionException];
+		}
 	}
 #endif
 	
@@ -2362,6 +2386,8 @@ static int connectionBusyHandler(void *ptr, int count)
 		if (wal_file)
 			wal_file->xNotifyDidRead = yapNotifyDidRead;
 	}
+
+	activeNestedReadTransaction = transaction;
 }
 
 /**
@@ -2371,6 +2397,8 @@ static int connectionBusyHandler(void *ptr, int count)
 **/
 - (void)postReadTransaction:(YapDatabaseReadTransaction *)transaction
 {
+	activeNestedReadTransaction = nil;
+
 	// Post-Read-Transaction: Step 1 of 5
 	//
 	// 1. Execute "COMMIT TRANSACTION" on database connection.
@@ -2689,6 +2717,8 @@ static int connectionBusyHandler(void *ptr, int count)
 	
 	if (mutationStack == nil)
 		mutationStack = [[YapMutationStack_Bool alloc] init];
+
+	activeNestedReadWriteTransaction = transaction;
 }
 
 /**
@@ -2699,6 +2729,8 @@ static int connectionBusyHandler(void *ptr, int count)
 **/
 - (void)postReadWriteTransaction:(YapDatabaseReadWriteTransaction *)transaction
 {
+	activeNestedReadWriteTransaction = nil;
+
 	if (transaction->rollback)
 	{
 		YDBLogVerbose(@"YapDatabaseConnection(%p) rollback read-write transaction", self);
